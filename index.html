@@ -450,6 +450,7 @@
 
       } catch (err) {
         console.error(err);
+        showDownloadProgress(false);
         updateStatus('Failed to load', 'error');
         updateGenerateButton(false, 'Retry');
         setOutput(`Error loading model:\n${err.message}\n\nMake sure WebGPU is enabled and you're using a supported browser.`);
