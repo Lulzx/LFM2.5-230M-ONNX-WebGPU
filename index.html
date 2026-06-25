@@ -228,6 +228,7 @@
   </div>
 
   <!-- Scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.23.0/dist/ort.webgpu.min.js"></script>
   <script type="module">
     // === CONFIG ===
     const MODEL_ID = "LiquidAI/LFM2.5-230M-ONNX"; // Change to "lulzx/LFM2.5-230M-ONNX" if using your mirror
@@ -240,7 +241,7 @@
     let MAX_NEW_TOKENS = 128;
 
     // === STATE ===
-    let ort = null;
+    let ortGlobal = null;
     let AutoTokenizer = null;
     let session = null;
     let tokenizer = null;
@@ -344,11 +345,13 @@
       try {
         updateStatus('Loading libraries...', 'loading');
 
-        // 1. Load onnxruntime-web (WebGPU)
-        const ortModule = await import('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.23.0/dist/ort.webgpu.min.js');
-        ort = ortModule.default || ortModule;
-        ort.env.wasm.numThreads = 1;
-        ort.env.wasm.simd = true;
+        // 1. onnxruntime-web is loaded globally via script tag above (WebGPU build)
+        if (!window.ort) {
+          throw new Error("onnxruntime-web failed to load. Check browser console.");
+        }
+        ortGlobal = window.ort;
+        ortGlobal.env.wasm.numThreads = 1;
+        ortGlobal.env.wasm.simd = true;
 
         // 2. Load only the tokenizer from @huggingface/transformers (lightweight)
         const hf = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/dist/transformers.min.js');
@@ -365,7 +368,7 @@
         const dataUrl = `${base}/onnx/model_q4.onnx_data`;
 
         // Create session with WebGPU + external data
-        session = await ort.InferenceSession.create(modelUrl, {
+        session = await ortGlobal.InferenceSession.create(modelUrl, {
           executionProviders: ['webgpu'],
           externalData: [{ path: 'model_q4.onnx_data', data: dataUrl }]
         });
@@ -451,9 +454,9 @@
       const cache = {};
       for (const name of session.inputNames) {
         if (name.startsWith("past_conv")) {
-          cache[name] = new ort.Tensor("float32", new Float32Array(HIDDEN_SIZE * 3), [1, HIDDEN_SIZE, 3]);
+          cache[name] = new ortGlobal.Tensor("float32", new Float32Array(HIDDEN_SIZE * 3), [1, HIDDEN_SIZE, 3]);
         } else if (name.startsWith("past_key_values")) {
-          cache[name] = new ort.Tensor("float32", new Float32Array(0), [1, NUM_KV_HEADS, 0, HEAD_DIM]);
+          cache[name] = new ortGlobal.Tensor("float32", new Float32Array(0), [1, NUM_KV_HEADS, 0, HEAD_DIM]);
         }
       }
 
@@ -467,13 +470,13 @@
       for (let step = 0; step < MAX_NEW_TOKENS; step++) {
         if (isGenerating === false) break; // allow early stop
 
-        const inputIdsTensor = new ort.Tensor(
+        const inputIdsTensor = new ortGlobal.Tensor(
           "int64", 
           new BigInt64Array(ids.map(BigInt)), 
           [1, ids.length]
         );
 
-        const attentionMask = new ort.Tensor(
+        const attentionMask = new ortGlobal.Tensor(
           "int64", 
           new BigInt64Array(curLen).fill(1n), 
           [1, curLen]
@@ -489,7 +492,7 @@
           const pos = step === 0 
             ? Array.from({length: curLen}, (_, i) => i)
             : [curLen - 1];
-          feeds.position_ids = new ort.Tensor("int64", new BigInt64Array(pos.map(BigInt)), [1, pos.length]);
+          feeds.position_ids = new ortGlobal.Tensor("int64", new BigInt64Array(pos.map(BigInt)), [1, pos.length]);
         }
 
         const outputs = await session.run(feeds);
