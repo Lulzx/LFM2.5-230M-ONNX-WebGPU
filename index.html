@@ -371,6 +371,17 @@
 
         const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/dist/transformers.min.js');
 
+        // Suppress the expected "Unknown tokenizer class TokenizersBackend" warning.
+        // This model uses a tokenizer class from the Python `tokenizers` lib that isn't fully registered
+        // in the current transformers.js build. The library falls back to the base PreTrainedTokenizer
+        // and everything (chat template + generation) works correctly.
+        const _origWarn = console.warn;
+        console.warn = (...a) => {
+          const m = a[0];
+          if (typeof m === 'string' && m.includes('TokenizersBackend')) return;
+          _origWarn.apply(console, a);
+        };
+
         updateStatus('Downloading model (~200MB)...', 'loading');
         showDownloadProgress(true);
         updateDownloadProgress(0, 'Starting download...');
