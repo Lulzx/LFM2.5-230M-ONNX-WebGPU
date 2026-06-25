@@ -260,11 +260,6 @@
     let isLoading = false;
     let isGenerating = false;
 
-    // Model dims (from config.json of 230M)
-    const HIDDEN_SIZE = 1024;
-    const NUM_KV_HEADS = 8;
-    const HEAD_DIM = 64;
-
     // === HELPERS ===
     function updateStatus(text, type = 'default') {
       const el = document.getElementById('status-text');
@@ -361,39 +356,11 @@
       if (labelEl && label) labelEl.textContent = label;
     }
 
-    async function fetchWithProgress(url, onProgress, label = 'file') {
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
-      const contentLength = response.headers.get('content-length');
-      const total = contentLength ? parseInt(contentLength, 10) : 0;
-      const reader = response.body.getReader();
-      let received = 0;
-      const chunks = [];
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        received += value.length;
-        if (total > 0) {
-          const p = Math.round((received / total) * 100);
-          onProgress(p, `${label} (${(received / 1024 / 1024).toFixed(0)} / ${(total / 1024 / 1024).toFixed(0)} MB)`);
-        } else {
-          onProgress(50, `${label} (streaming...)`);
-        }
-      }
-      // Concatenate into ArrayBuffer
-      const buffer = new Uint8Array(received);
-      let offset = 0;
-      for (const chunk of chunks) {
-        buffer.set(chunk, offset);
-        offset += chunk.length;
-      }
-      return buffer.buffer;
-    }
+    // === CORE: Load using high-level pipeline (recommended for this model) ===
+    let generator = null;
 
-    // === CORE: Load ONNX + Tokenizer (low-level for full LFM2 compatibility) ===
     async function loadModel() {
-      if (session) return; // already loaded
+      if (generator) return; // already loaded
 
       if (isLoading) return;
       isLoading = true;
@@ -402,206 +369,80 @@
       try {
         updateStatus('Loading libraries...', 'loading');
 
-        // 1. onnxruntime-web is loaded globally via script tag above (WebGPU build)
-        if (!window.ort) {
-          throw new Error("onnxruntime-web failed to load. Check browser console.");
-        }
-        ortGlobal = window.ort;
-        ortGlobal.env.wasm.numThreads = 1;
-        ortGlobal.env.wasm.simd = true;
+        const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/dist/transformers.min.js');
 
-        // 2. Load only the tokenizer from @huggingface/transformers (lightweight)
-        const hf = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/dist/transformers.min.js');
-        AutoTokenizer = hf.AutoTokenizer;
-
-        // 3. Download tokenizer (small)
-        tokenizer = await AutoTokenizer.from_pretrained(MODEL_ID);
-
-        // 4. Download the ONNX model files with visible progress (~200 MB total for Q4)
         updateStatus('Downloading model (~200MB)...', 'loading');
         showDownloadProgress(true);
-        updateDownloadProgress(0, 'Preparing download...');
+        updateDownloadProgress(0, 'Starting download...');
 
-        const base = `https://huggingface.co/${MODEL_ID}/resolve/main`;
-        const modelUrl = `${base}/onnx/model_q4.onnx`;
-        const dataUrl = `${base}/onnx/model_q4.onnx_data`;
-
-        // Download graph (small) + weights (main size) with progress callbacks
-        const modelBuffer = await fetchWithProgress(modelUrl, (p, lbl) => updateDownloadProgress(p, lbl), 'graph');
-        const dataBuffer = await fetchWithProgress(dataUrl, (p, lbl) => updateDownloadProgress(p, lbl), 'weights');
-
-        showDownloadProgress(false);
-        updateStatus('Initializing on WebGPU...', 'loading');
-
-        // Create session from in-memory buffers + external data
-        session = await ortGlobal.InferenceSession.create(modelBuffer, {
-          executionProviders: ['webgpu'],
-          externalData: [{
-            path: 'model_q4.onnx_data',
-            data: new Uint8Array(dataBuffer)
-          }]
+        generator = await pipeline('text-generation', MODEL_ID, {
+          device: 'webgpu',
+          dtype: 'q4',
+          progress_callback: (progress) => {
+            // The library reports detailed progress for each file (tokenizer, onnx graph, onnx_data, etc.)
+            if (progress.progress !== undefined) {
+              const p = Math.round(progress.progress * 100);
+              let lbl = progress.name || progress.file || 'model';
+              if (progress.loaded && progress.total) {
+                const mbLoaded = (progress.loaded / 1024 / 1024).toFixed(0);
+                const mbTotal = (progress.total / 1024 / 1024).toFixed(0);
+                lbl = `${lbl} (${mbLoaded}/${mbTotal} MB)`;
+              }
+              updateDownloadProgress(p, `Downloading ${lbl}`);
+            } else if (progress.status) {
+              updateDownloadProgress(50, progress.status);
+            }
+          }
         });
 
+        showDownloadProgress(false);
         updateStatus('Ready (WebGPU Q4)', 'ready');
         updateGenerateButton(false, 'Generate');
 
-        console.log('[WebGPU Demo] Model loaded successfully');
-        console.log('Inputs:', session.inputNames.slice(0, 6), '...');
+        console.log('[WebGPU Demo] Pipeline loaded successfully');
 
       } catch (err) {
         console.error(err);
         showDownloadProgress(false);
         updateStatus('Failed to load', 'error');
         updateGenerateButton(false, 'Retry');
-        setOutput(`Error loading model:\n${err.message}\n\nMake sure WebGPU is enabled and you're using a supported browser.`);
+        setOutput(`Error loading model:\n${err.message}\n\nMake sure WebGPU is enabled and you're using a supported browser.\n\nNote: You may see a "TokenizersBackend" warning in the console — this is non-fatal and the model should still work (the library falls back to the base tokenizer).`);
       } finally {
         isLoading = false;
       }
     }
 
-    // === Sampling (matches the Python reference in the ONNX README) ===
-    function sampleToken(logits, generatedTokens, vocabSize) {
-      const logitsArr = new Float32Array(logits);
-
-      // Repetition penalty
-      const seen = new Set(generatedTokens);
-      for (const tokenId of seen) {
-        if (logitsArr[tokenId] > 0) {
-          logitsArr[tokenId] /= REPETITION_PENALTY;
-        } else {
-          logitsArr[tokenId] *= REPETITION_PENALTY;
-        }
-      }
-
-      // Temperature
-      for (let i = 0; i < vocabSize; i++) {
-        logitsArr[i] /= TEMPERATURE;
-      }
-
-      // Top-K
-      const indexed = Array.from(logitsArr.slice(0, vocabSize), (v, i) => [v, i]);
-      indexed.sort((a, b) => b[0] - a[0]);
-      const topK = indexed.slice(0, TOP_K);
-
-      // Softmax
-      const maxLogit = topK[0][0];
-      const exps = topK.map(([v, i]) => [Math.exp(v - maxLogit), i]);
-      const sumExp = exps.reduce((s, [e]) => s + e, 0);
-      const probs = exps.map(([e, i]) => [e / sumExp, i]);
-
-      // Sample
-      let r = Math.random();
-      for (const [p, i] of probs) {
-        r -= p;
-        if (r <= 0) return i;
-      }
-      return probs[probs.length - 1][1];
-    }
-
-    // === Main generation loop (adapted from 350M/230M ONNX README) ===
+    // === Generation using high-level pipeline ===
     async function runGeneration(promptText) {
-      if (!session || !tokenizer) {
+      if (!generator) {
         await loadModel();
       }
-      if (!session) throw new Error("Model failed to load");
+      if (!generator) throw new Error("Model failed to load");
 
       getSamplingParams();
 
       const startTime = performance.now();
-      const outputEl = document.getElementById('output-container');
-      outputEl.innerHTML = ''; // clear
+      const outputContainer = document.getElementById('output-container');
+      outputContainer.innerHTML = '';
 
-      // Build prompt using chat template
       const messages = [{ role: "user", content: promptText }];
-      const prompt = tokenizer.apply_chat_template(messages, { 
-        add_generation_prompt: true, 
-        tokenize: false 
+
+      // Use return_full_text: false to get only the generated response
+      const outputs = await generator(messages, {
+        max_new_tokens: MAX_NEW_TOKENS,
+        temperature: TEMPERATURE,
+        top_k: TOP_K,
+        repetition_penalty: REPETITION_PENALTY,
+        return_full_text: false,
       });
-      let inputIds = tokenizer.encode(prompt);
-      let curLen = inputIds.length;
 
-      // Initialize caches
-      const cache = {};
-      for (const name of session.inputNames) {
-        if (name.startsWith("past_conv")) {
-          cache[name] = new ortGlobal.Tensor("float32", new Float32Array(HIDDEN_SIZE * 3), [1, HIDDEN_SIZE, 3]);
-        } else if (name.startsWith("past_key_values")) {
-          cache[name] = new ortGlobal.Tensor("float32", new Float32Array(0), [1, NUM_KV_HEADS, 0, HEAD_DIM]);
-        }
-      }
-
-      const eosTokenId = tokenizer.eos_token_id || 7;
-      const generatedTokens = [];
-      let ids = inputIds;
-
-      const inputNames = session.inputNames;
-      const usePositionIds = inputNames.includes("position_ids");
-
-      for (let step = 0; step < MAX_NEW_TOKENS; step++) {
-        if (isGenerating === false) break; // allow early stop
-
-        const inputIdsTensor = new ortGlobal.Tensor(
-          "int64", 
-          new BigInt64Array(ids.map(BigInt)), 
-          [1, ids.length]
-        );
-
-        const attentionMask = new ortGlobal.Tensor(
-          "int64", 
-          new BigInt64Array(curLen).fill(1n), 
-          [1, curLen]
-        );
-
-        const feeds = {
-          input_ids: inputIdsTensor,
-          attention_mask: attentionMask,
-          ...cache
-        };
-
-        if (usePositionIds) {
-          const pos = step === 0 
-            ? Array.from({length: curLen}, (_, i) => i)
-            : [curLen - 1];
-          feeds.position_ids = new ortGlobal.Tensor("int64", new BigInt64Array(pos.map(BigInt)), [1, pos.length]);
-        }
-
-        const outputs = await session.run(feeds);
-
-        // Get logits (first output)
-        const logitsTensor = outputs.logits || Object.values(outputs)[0];
-        const vocabSize = logitsTensor.dims[2];
-        const lastLogits = logitsTensor.data.slice(
-          (logitsTensor.dims[1] - 1) * vocabSize, 
-          logitsTensor.dims[1] * vocabSize
-        );
-
-        const nextToken = sampleToken(lastLogits, generatedTokens, vocabSize);
-        generatedTokens.push(nextToken);
-
-        // Stream the decoded token
-        const decoded = tokenizer.decode([nextToken], { skip_special_tokens: true });
-        appendToken(decoded);
-
-        if (nextToken === eosTokenId) {
-          break;
-        }
-
-        // Update KV cache (same mapping as Python reference)
-        for (const [name, tensor] of Object.entries(outputs)) {
-          if (name.startsWith("present_conv")) {
-            cache[name.replace("present_conv", "past_conv")] = tensor;
-          } else if (name.startsWith("present.")) {
-            cache[name.replace("present.", "past_key_values.")] = tensor;
-          }
-        }
-
-        // Next input = just the new token
-        ids = [nextToken];
-        curLen++;
-      }
+      const generated = outputs[0]?.generated_text || '';
+      setOutput(generated);
 
       const elapsed = performance.now() - startTime;
-      showPerf(generatedTokens.length, elapsed);
+      // Approximate token count (rough)
+      const approxTokens = Math.ceil(generated.length / 4);
+      showPerf(approxTokens, elapsed);
     }
 
     // === Public generate function ===
