@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LFM2.5-230M • WebGPU Demo</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=Space+Grotesk:wght@500;600&amp;display=swap');
+    
+    :root {
+      --primary: #6366f1;
+    }
+    
+    body {
+      font-family: 'Inter', system_ui, sans-serif;
+    }
+    
+    .font-display {
+      font-family: 'Space Grotesk', 'Inter', system_ui, sans-serif;
+    }
+
+    .glass {
+      background: rgba(255,255,255, 0.08);
+      backdrop-filter: blur(16px);
+    }
+
+    .model-card {
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .log-container {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      scrollbar-width: thin;
+    }
+
+    .token {
+      display: inline;
+      animation: fadeIn 0.1s ease forwards;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    .status-dot {
+      animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+
+    .webgpu-badge {
+      background: linear-gradient(90deg, #6366f1, #a855f7);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body class="bg-zinc-950 text-zinc-200">
+  <div class="max-w-4xl mx-auto px-4 py-8">
+    <!-- Header -->
+    <div class="flex items-center justify-between mb-8">
+      <div class="flex items-center gap-x-3">
+        <div class="w-11 h-11 bg-gradient-to-br from-indigo-500 to-violet-500 rounded-2xl flex items-center justify-center shadow-inner">
+          <i class="fa-solid fa-microchip text-white text-3xl"></i>
+        </div>
+        <div>
+          <h1 class="font-display text-3xl font-semibold tracking-tighter">LFM2.5-230M</h1>
+          <p class="text-zinc-400 text-sm -mt-1">WebGPU • ONNX • Browser</p>
+        </div>
+      </div>
+      
+      <div class="flex items-center gap-x-2">
+        <a href="https://huggingface.co/LiquidAI/LFM2.5-230M-ONNX" target="_blank"
+           class="flex items-center gap-x-2 px-3 py-1.5 text-sm bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-2xl transition-colors">
+          <i class="fa-solid fa-globe fa-sm"></i>
+          <span class="hidden sm:inline">View on HF</span>
+        </a>
+        <a href="https://github.com/Lulzx/LFM2.5-230M-ONNX-WebGPU" target="_blank"
+           class="flex items-center gap-x-2 px-3 py-1.5 text-sm bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-2xl transition-colors">
+          <i class="fa-brands fa-github fa-sm"></i>
+          <span class="hidden sm:inline">GitHub</span>
+        </a>
+      </div>
+    </div>
+
+    <!-- Hero -->
+    <div class="mb-8">
+      <div class="flex items-center gap-x-2 mb-2">
+        <div class="inline-flex items-center gap-x-1.5 px-3 py-1 bg-emerald-500/10 text-emerald-400 text-xs font-medium rounded-full border border-emerald-500/20">
+          <div class="w-1.5 h-1.5 bg-emerald-400 rounded-full status-dot"></div>
+          RUNS LOCALLY
+        </div>
+        <div class="inline-flex items-center gap-x-1.5 px-3 py-1 bg-violet-500/10 text-violet-400 text-xs font-medium rounded-full border border-violet-500/20">
+          <i class="fa-solid fa-bolt fa-sm"></i>
+          <span>WebGPU</span>
+        </div>
+      </div>
+      
+      <h2 class="font-display text-5xl font-semibold tracking-tighter leading-none mb-3">
+        The 230M model.<br>
+        <span class="text-zinc-400">Now in your browser.</span>
+      </h2>
+      <p class="max-w-md text-lg text-zinc-400">
+        No backend. No API. The full LFM2.5-230M ONNX model runs directly on your GPU via WebGPU.
+      </p>
+    </div>
+
+    <!-- Model Info -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-8">
+      <div class="model-card bg-zinc-900 border border-zinc-800 rounded-3xl p-4">
+        <div class="text-xs text-zinc-500 mb-1">MODEL</div>
+        <div class="font-semibold">LFM2.5-230M-ONNX</div>
+        <div class="text-sm text-zinc-400 mt-1">Q4 quantized • ~200 MB</div>
+      </div>
+      <div class="model-card bg-zinc-900 border border-zinc-800 rounded-3xl p-4">
+        <div class="text-xs text-zinc-500 mb-1">BACKEND</div>
+        <div class="font-semibold flex items-center gap-x-2">
+          ONNX Runtime WebGPU
+          <span class="text-[10px] px-1.5 py-0.5 bg-violet-500/20 text-violet-400 rounded">WASM + GPU</span>
+        </div>
+        <div class="text-sm text-zinc-400 mt-1">Custom KV cache for hybrid conv + GQA layers</div>
+      </div>
+      <div class="model-card bg-zinc-900 border border-zinc-800 rounded-3xl p-4">
+        <div class="text-xs text-zinc-500 mb-1">PERFORMANCE</div>
+        <div class="text-emerald-400 font-semibold">~40-100+ tok/s*</div>
+        <div class="text-xs text-zinc-500 mt-1">*On modern integrated/discrete GPUs. First load includes download + JIT compile.</div>
+      </div>
+    </div>
+
+    <!-- Main Demo -->
+    <div class="bg-zinc-900 border border-zinc-800 rounded-3xl overflow-hidden">
+      <!-- Controls -->
+      <div class="px-5 pt-5 pb-4 border-b border-zinc-800 bg-zinc-950/50">
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <span class="font-medium">Inference in browser</span>
+          </div>
+          <div id="model-status" 
+               class="inline-flex items-center gap-x-2 text-xs px-3 py-1 rounded-2xl bg-zinc-800 border border-zinc-700 text-zinc-400">
+            <i class="fa-solid fa-circle fa-xs"></i>
+            <span id="status-text">Model not loaded</span>
+          </div>
+        </div>
+
+        <!-- Settings -->
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div>
+            <label class="block text-xs text-zinc-400 mb-1.5">Max new tokens</label>
+            <input type="number" id="max-tokens" value="128" 
+                   class="w-full bg-zinc-950 border border-zinc-800 focus:border-indigo-500 rounded-2xl px-3 py-2 text-sm outline-none">
+          </div>
+          <div>
+            <label class="block text-xs text-zinc-400 mb-1.5">Temperature</label>
+            <input type="number" id="temperature" value="0.1" step="0.1" 
+                   class="w-full bg-zinc-950 border border-zinc-800 focus:border-indigo-500 rounded-2xl px-3 py-2 text-sm outline-none">
+          </div>
+          <div>
+            <label class="block text-xs text-zinc-400 mb-1.5">Top K</label>
+            <input type="number" id="top-k" value="50" 
+                   class="w-full bg-zinc-950 border border-zinc-800 focus:border-indigo-500 rounded-2xl px-3 py-2 text-sm outline-none">
+          </div>
+          <div>
+            <label class="block text-xs text-zinc-400 mb-1.5">Repetition penalty</label>
+            <input type="number" id="repetition-penalty" value="1.05" step="0.05" 
+                   class="w-full bg-zinc-950 border border-zinc-800 focus:border-indigo-500 rounded-2xl px-3 py-2 text-sm outline-none">
+          </div>
+        </div>
+      </div>
+
+      <!-- Prompt -->
+      <div class="p-5">
+        <div class="mb-2 flex items-center justify-between">
+          <label class="text-sm font-medium text-zinc-300">Prompt</label>
+          <button onclick="useExamplePrompt()" 
+                  class="text-xs flex items-center gap-x-1 text-indigo-400 hover:text-indigo-300 transition-colors">
+            <i class="fa-solid fa-magic fa-sm"></i>
+            <span>Use example</span>
+          </button>
+        </div>
+        
+        <textarea id="prompt" rows="3" 
+                  class="w-full bg-zinc-950 border border-zinc-800 focus:border-indigo-500 rounded-3xl px-4 py-3 text-sm resize-y outline-none"
+                  placeholder="What is the capital of France?"></textarea>
+
+        <div class="flex gap-x-2 mt-3">
+          <button onclick="generate()"
+                  id="generate-btn"
+                  class="flex-1 flex items-center justify-center gap-x-2 bg-white hover:bg-zinc-100 active:bg-zinc-200 transition-all text-zinc-950 font-semibold py-3 rounded-3xl text-sm">
+            <i class="fa-solid fa-play fa-sm"></i>
+            <span id="generate-text">Load Model &amp; Generate</span>
+          </button>
+          
+          <button onclick="clearOutput()"
+                  class="px-5 py-3 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-3xl text-sm transition-colors">
+            <i class="fa-solid fa-trash fa-sm"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Output -->
+      <div class="border-t border-zinc-800 bg-black/30">
+        <div class="px-5 py-3 flex items-center justify-between text-xs border-b border-zinc-800">
+          <div class="font-medium text-zinc-400">Output</div>
+          <div id="perf-info" class="text-emerald-400 font-mono text-[10px] hidden"></div>
+        </div>
+        
+        <div id="output-container" 
+             class="log-container min-h-[180px] max-h-[320px] p-5 text-sm overflow-auto bg-zinc-950 whitespace-pre-wrap break-words leading-relaxed">
+          <div class="text-zinc-500 italic text-sm">Generated tokens will appear here...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer notes -->
+    <div class="mt-6 text-xs text-zinc-500 space-y-1 px-1">
+      <div>
+        <strong class="text-zinc-400">First run:</strong> Downloads ~200MB (Q4). Cached afterwards in your browser's storage.
+      </div>
+      <div>
+        Uses the same custom ONNX export as the Python / server version (hybrid conv + attention layers with specialized cache).
+      </div>
+      <div class="pt-1">
+        <a href="https://huggingface.co/LiquidAI/LFM2.5-230M-ONNX" class="text-indigo-400 hover:underline">Model card &amp; other runtimes →</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script type="module">
+    // === CONFIG ===
+    const MODEL_ID = "LiquidAI/LFM2.5-230M-ONNX"; // Change to "lulzx/LFM2.5-230M-ONNX" if using your mirror
+    const DTYPE = "q4"; // "q4", "fp16"
+
+    // Sampling defaults (also exposed in UI)
+    let TEMPERATURE = 0.1;
+    let TOP_K = 50;
+    let REPETITION_PENALTY = 1.05;
+    let MAX_NEW_TOKENS = 128;
+
+    // === STATE ===
+    let ort = null;
+    let AutoTokenizer = null;
+    let session = null;
+    let tokenizer = null;
+    let isLoading = false;
+    let isGenerating = false;
+
+    // Model dims (from config.json of 230M)
+    const HIDDEN_SIZE = 1024;
+    const NUM_KV_HEADS = 8;
+    const HEAD_DIM = 64;
+
+    // === HELPERS ===
+    function updateStatus(text, type = 'default') {
+      const el = document.getElementById('status-text');
+      const container = document.getElementById('model-status');
+      
+      el.textContent = text;
+      
+      container.className = `inline-flex items-center gap-x-2 text-xs px-3 py-1 rounded-2xl border`;
+      
+      if (type === 'loading') {
+        container.classList.add('bg-amber-500/10', 'border-amber-500/30', 'text-amber-400');
+      } else if (type === 'ready') {
+        container.classList.add('bg-emerald-500/10', 'border-emerald-500/30', 'text-emerald-400');
+      } else if (type === 'error') {
+        container.classList.add('bg-red-500/10', 'border-red-500/30', 'text-red-400');
+      } else {
+        container.classList.add('bg-zinc-800', 'border-zinc-700', 'text-zinc-400');
+      }
+    }
+
+    function appendToken(text) {
+      const container = document.getElementById('output-container');
+      
+      // Remove placeholder on first token
+      if (container.querySelector('.italic')) {
+        container.innerHTML = '';
+      }
+      
+      const span = document.createElement('span');
+      span.className = 'token';
+      span.textContent = text;
+      container.appendChild(span);
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function setOutput(text) {
+      const container = document.getElementById('output-container');
+      container.innerHTML = `<div>${text}</div>`;
+    }
+
+    function showPerf(tokens, timeMs) {
+      const el = document.getElementById('perf-info');
+      const tps = (tokens / (timeMs / 1000)).toFixed(1);
+      el.textContent = `${tokens} tokens • ${tps} tok/s`;
+      el.classList.remove('hidden');
+    }
+
+    function updateGenerateButton(loading, text) {
+      const btn = document.getElementById('generate-btn');
+      const txt = document.getElementById('generate-text');
+      
+      if (loading) {
+        btn.disabled = true;
+        btn.classList.add('opacity-75', 'cursor-not-allowed');
+        txt.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-2"></i>${text}`;
+      } else {
+        btn.disabled = false;
+        btn.classList.remove('opacity-75', 'cursor-not-allowed');
+        txt.innerHTML = text;
+      }
+    }
+
+    function getSamplingParams() {
+      TEMPERATURE = parseFloat(document.getElementById('temperature').value) || 0.1;
+      TOP_K = parseInt(document.getElementById('top-k').value) || 50;
+      REPETITION_PENALTY = parseFloat(document.getElementById('repetition-penalty').value) || 1.05;
+      MAX_NEW_TOKENS = parseInt(document.getElementById('max-tokens').value) || 128;
+    }
+
+    function useExamplePrompt() {
+      const ta = document.getElementById('prompt');
+      ta.value = "What is the capital of France and what is it famous for?";
+      ta.focus();
+    }
+
+    function clearOutput() {
+      const container = document.getElementById('output-container');
+      container.innerHTML = `<div class="text-zinc-500 italic text-sm">Generated tokens will appear here...</div>`;
+      document.getElementById('perf-info').classList.add('hidden');
+    }
+
+    // === CORE: Load ONNX + Tokenizer (low-level for full LFM2 compatibility) ===
+    async function loadModel() {
+      if (session) return; // already loaded
+
+      if (isLoading) return;
+      isLoading = true;
+      updateGenerateButton(true, 'Loading...');
+
+      try {
+        updateStatus('Loading libraries...', 'loading');
+
+        // 1. Load onnxruntime-web (WebGPU)
+        const ortModule = await import('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.23.0/dist/ort.webgpu.min.js');
+        ort = ortModule.default || ortModule;
+        ort.env.wasm.numThreads = 1;
+        ort.env.wasm.simd = true;
+
+        // 2. Load only the tokenizer from @huggingface/transformers (lightweight)
+        const hf = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/dist/transformers.min.js');
+        AutoTokenizer = hf.AutoTokenizer;
+
+        updateStatus('Downloading model (~200MB)...', 'loading');
+
+        // 3. Download tokenizer from the model
+        tokenizer = await AutoTokenizer.from_pretrained(MODEL_ID);
+
+        // 4. Download the ONNX model (Q4 recommended for WebGPU)
+        const base = `https://huggingface.co/${MODEL_ID}/resolve/main`;
+        const modelUrl = `${base}/onnx/model_q4.onnx`;
+        const dataUrl = `${base}/onnx/model_q4.onnx_data`;
+
+        // Create session with WebGPU + external data
+        session = await ort.InferenceSession.create(modelUrl, {
+          executionProviders: ['webgpu'],
+          externalData: [{ path: 'model_q4.onnx_data', data: dataUrl }]
+        });
+
+        updateStatus('Ready (WebGPU Q4)', 'ready');
+        updateGenerateButton(false, 'Generate');
+
+        console.log('[WebGPU Demo] Model loaded successfully');
+        console.log('Inputs:', session.inputNames.slice(0, 6), '...');
+
+      } catch (err) {
+        console.error(err);
+        updateStatus('Failed to load', 'error');
+        updateGenerateButton(false, 'Retry');
+        setOutput(`Error loading model:\n${err.message}\n\nMake sure WebGPU is enabled and you're using a supported browser.`);
+      } finally {
+        isLoading = false;
+      }
+    }
+
+    // === Sampling (matches the Python reference in the ONNX README) ===
+    function sampleToken(logits, generatedTokens, vocabSize) {
+      const logitsArr = new Float32Array(logits);
+
+      // Repetition penalty
+      const seen = new Set(generatedTokens);
+      for (const tokenId of seen) {
+        if (logitsArr[tokenId] > 0) {
+          logitsArr[tokenId] /= REPETITION_PENALTY;
+        } else {
+          logitsArr[tokenId] *= REPETITION_PENALTY;
+        }
+      }
+
+      // Temperature
+      for (let i = 0; i < vocabSize; i++) {
+        logitsArr[i] /= TEMPERATURE;
+      }
+
+      // Top-K
+      const indexed = Array.from(logitsArr.slice(0, vocabSize), (v, i) => [v, i]);
+      indexed.sort((a, b) => b[0] - a[0]);
+      const topK = indexed.slice(0, TOP_K);
+
+      // Softmax
+      const maxLogit = topK[0][0];
+      const exps = topK.map(([v, i]) => [Math.exp(v - maxLogit), i]);
+      const sumExp = exps.reduce((s, [e]) => s + e, 0);
+      const probs = exps.map(([e, i]) => [e / sumExp, i]);
+
+      // Sample
+      let r = Math.random();
+      for (const [p, i] of probs) {
+        r -= p;
+        if (r <= 0) return i;
+      }
+      return probs[probs.length - 1][1];
+    }
+
+    // === Main generation loop (adapted from 350M/230M ONNX README) ===
+    async function runGeneration(promptText) {
+      if (!session || !tokenizer) {
+        await loadModel();
+      }
+      if (!session) throw new Error("Model failed to load");
+
+      getSamplingParams();
+
+      const startTime = performance.now();
+      const outputEl = document.getElementById('output-container');
+      outputEl.innerHTML = ''; // clear
+
+      // Build prompt using chat template
+      const messages = [{ role: "user", content: promptText }];
+      const prompt = tokenizer.apply_chat_template(messages, { 
+        add_generation_prompt: true, 
+        tokenize: false 
+      });
+      let inputIds = tokenizer.encode(prompt);
+      let curLen = inputIds.length;
+
+      // Initialize caches
+      const cache = {};
+      for (const name of session.inputNames) {
+        if (name.startsWith("past_conv")) {
+          cache[name] = new ort.Tensor("float32", new Float32Array(HIDDEN_SIZE * 3), [1, HIDDEN_SIZE, 3]);
+        } else if (name.startsWith("past_key_values")) {
+          cache[name] = new ort.Tensor("float32", new Float32Array(0), [1, NUM_KV_HEADS, 0, HEAD_DIM]);
+        }
+      }
+
+      const eosTokenId = tokenizer.eos_token_id || 7;
+      const generatedTokens = [];
+      let ids = inputIds;
+
+      const inputNames = session.inputNames;
+      const usePositionIds = inputNames.includes("position_ids");
+
+      for (let step = 0; step < MAX_NEW_TOKENS; step++) {
+        if (isGenerating === false) break; // allow early stop
+
+        const inputIdsTensor = new ort.Tensor(
+          "int64", 
+          new BigInt64Array(ids.map(BigInt)), 
+          [1, ids.length]
+        );
+
+        const attentionMask = new ort.Tensor(
+          "int64", 
+          new BigInt64Array(curLen).fill(1n), 
+          [1, curLen]
+        );
+
+        const feeds = {
+          input_ids: inputIdsTensor,
+          attention_mask: attentionMask,
+          ...cache
+        };
+
+        if (usePositionIds) {
+          const pos = step === 0 
+            ? Array.from({length: curLen}, (_, i) => i)
+            : [curLen - 1];
+          feeds.position_ids = new ort.Tensor("int64", new BigInt64Array(pos.map(BigInt)), [1, pos.length]);
+        }
+
+        const outputs = await session.run(feeds);
+
+        // Get logits (first output)
+        const logitsTensor = outputs.logits || Object.values(outputs)[0];
+        const vocabSize = logitsTensor.dims[2];
+        const lastLogits = logitsTensor.data.slice(
+          (logitsTensor.dims[1] - 1) * vocabSize, 
+          logitsTensor.dims[1] * vocabSize
+        );
+
+        const nextToken = sampleToken(lastLogits, generatedTokens, vocabSize);
+        generatedTokens.push(nextToken);
+
+        // Stream the decoded token
+        const decoded = tokenizer.decode([nextToken], { skip_special_tokens: true });
+        appendToken(decoded);
+
+        if (nextToken === eosTokenId) {
+          break;
+        }
+
+        // Update KV cache (same mapping as Python reference)
+        for (const [name, tensor] of Object.entries(outputs)) {
+          if (name.startsWith("present_conv")) {
+            cache[name.replace("present_conv", "past_conv")] = tensor;
+          } else if (name.startsWith("present.")) {
+            cache[name.replace("present.", "past_key_values.")] = tensor;
+          }
+        }
+
+        // Next input = just the new token
+        ids = [nextToken];
+        curLen++;
+      }
+
+      const elapsed = performance.now() - startTime;
+      showPerf(generatedTokens.length, elapsed);
+    }
+
+    // === Public generate function ===
+    window.generate = async function () {
+      const btn = document.getElementById('generate-btn');
+      const promptEl = document.getElementById('prompt');
+      const promptText = promptEl.value.trim() || "What is the capital of France?";
+
+      if (isGenerating) {
+        isGenerating = false;
+        return;
+      }
+
+      isGenerating = true;
+      updateGenerateButton(true, 'Generating...');
+      clearOutput();
+
+      try {
+        await runGeneration(promptText);
+      } catch (err) {
+        console.error(err);
+        setOutput(`Generation error:\n${err.message}`);
+      } finally {
+        isGenerating = false;
+        updateGenerateButton(false, 'Generate Again');
+      }
+    };
+
+    // Keyboard shortcut
+    document.addEventListener('keydown', (e) => {
+      if (e.key === '/' && document.activeElement.tagName === 'BODY') {
+        e.preventDefault();
+        document.getElementById('prompt').focus();
+      }
+      if (e.metaKey && e.key === 'Enter') {
+        e.preventDefault();
+        window.generate();
+      }
+    });
+
+    // Boot
+    (function init() {
+      // Preload hint
+      updateStatus('Click generate to load model', 'default');
+
+      // Nice defaults in textarea
+      const ta = document.getElementById('prompt');
+      ta.placeholder = "Ask anything... (e.g. Explain photosynthesis in one paragraph)";
+
+      // Auto-enable a nice example on focus
+      ta.addEventListener('focus', () => {
+        if (!ta.value) {
+          // optional: can prefill
+        }
+      }, { once: true });
+
+      // Optional: auto-load model on page load (commented because heavy)
+      // setTimeout(() => { loadModel(); }, 1200);
+    })();
+  </script>
+</body>
+</html>
