@@ -260,6 +260,11 @@
     let isLoading = false;
     let isGenerating = false;
 
+    // Model dims for cache initialization (from config.json)
+    const HIDDEN_SIZE = 1024;
+    const NUM_KV_HEADS = 8;
+    const HEAD_DIM = 64;
+
     // === HELPERS ===
     function updateStatus(text, type = 'default') {
       const el = document.getElementById('status-text');
@@ -341,6 +346,45 @@
       document.getElementById('perf-info').classList.add('hidden');
     }
 
+    // === Sampling (repetition penalty + temperature + top-k) ===
+    function sampleToken(logits, generatedTokens, vocabSize) {
+      const logitsArr = new Float32Array(logits);
+
+      // Repetition penalty
+      const seen = new Set(generatedTokens);
+      for (const tokenId of seen) {
+        if (logitsArr[tokenId] > 0) {
+          logitsArr[tokenId] /= REPETITION_PENALTY;
+        } else {
+          logitsArr[tokenId] *= REPETITION_PENALTY;
+        }
+      }
+
+      // Temperature
+      for (let i = 0; i < vocabSize; i++) {
+        logitsArr[i] /= TEMPERATURE;
+      }
+
+      // Top-K
+      const indexed = Array.from(logitsArr.slice(0, vocabSize), (v, i) => [v, i]);
+      indexed.sort((a, b) => b[0] - a[0]);
+      const topK = indexed.slice(0, TOP_K);
+
+      // Softmax
+      const maxLogit = topK[0][0];
+      const exps = topK.map(([v, i]) => [Math.exp(v - maxLogit), i]);
+      const sumExp = exps.reduce((s, [e]) => s + e, 0);
+      const probs = exps.map(([e, i]) => [e / sumExp, i]);
+
+      // Sample
+      let r = Math.random();
+      for (const [p, i] of probs) {
+        r -= p;
+        if (r <= 0) return i;
+      }
+      return probs[probs.length - 1][1];
+    }
+
     // === Progress UI helpers ===
     function showDownloadProgress(show) {
       const c = document.getElementById('download-progress-container');
@@ -357,10 +401,8 @@
     }
 
     // === CORE: Load using high-level pipeline (recommended for this model) ===
-    let generator = null;
-
     async function loadModel() {
-      if (generator) return; // already loaded
+      if (session) return; // already loaded
 
       if (isLoading) return;
       isLoading = true;
@@ -369,12 +411,14 @@
       try {
         updateStatus('Loading libraries...', 'loading');
 
-        const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/dist/transformers.min.js');
+        if (!window.ort) {
+          throw new Error('onnxruntime-web failed to load from script tag.');
+        }
+        ortGlobal = window.ort;
+        ortGlobal.env.wasm.numThreads = 1;
+        ortGlobal.env.wasm.simd = true;
 
         // Suppress the expected "Unknown tokenizer class TokenizersBackend" warning.
-        // This model uses a tokenizer class from the Python `tokenizers` lib that isn't fully registered
-        // in the current transformers.js build. The library falls back to the base PreTrainedTokenizer
-        // and everything (chat template + generation) works correctly.
         const _origWarn = console.warn;
         console.warn = (...a) => {
           const m = a[0];
@@ -382,78 +426,154 @@
           _origWarn.apply(console, a);
         };
 
+        const hf = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/dist/transformers.min.js');
+        AutoTokenizer = hf.AutoTokenizer;
+
+        tokenizer = await AutoTokenizer.from_pretrained(MODEL_ID);
+
         updateStatus('Downloading model (~200MB)...', 'loading');
         showDownloadProgress(true);
         updateDownloadProgress(0, 'Starting download...');
 
-        generator = await pipeline('text-generation', MODEL_ID, {
-          device: 'webgpu',
-          dtype: 'q4',
-          progress_callback: (progress) => {
-            // The library reports detailed progress for each file (tokenizer, onnx graph, onnx_data, etc.)
-            if (progress.progress !== undefined) {
-              const p = Math.round(progress.progress * 100);
-              let lbl = progress.name || progress.file || 'model';
-              if (progress.loaded && progress.total) {
-                const mbLoaded = (progress.loaded / 1024 / 1024).toFixed(0);
-                const mbTotal = (progress.total / 1024 / 1024).toFixed(0);
-                lbl = `${lbl} (${mbLoaded}/${mbTotal} MB)`;
-              }
-              updateDownloadProgress(p, `Downloading ${lbl}`);
-            } else if (progress.status) {
-              updateDownloadProgress(50, progress.status);
-            }
-          }
-        });
+        const base = `https://huggingface.co/${MODEL_ID}/resolve/main`;
+        const modelUrl = `${base}/onnx/model_q4.onnx`;
+        const dataUrl = `${base}/onnx/model_q4.onnx_data`;
+
+        // Use manual fetch + progress bar to show % and MB while downloading the large files
+        const modelBuffer = await fetchWithProgress(modelUrl, (p, lbl) => updateDownloadProgress(p, lbl), 'graph');
+        updateDownloadProgress(0, 'Downloading weights...');
+        const dataBuffer = await fetchWithProgress(dataUrl, (p, lbl) => updateDownloadProgress(p, lbl), 'weights');
 
         showDownloadProgress(false);
+        updateStatus('Creating session...', 'loading');
+
+        // Create from buffers so we can provide external data as bytes (progress was manual)
+        session = await ortGlobal.InferenceSession.create(modelBuffer, {
+          executionProviders: ['webgpu'],
+          externalData: [{
+            data: new Uint8Array(dataBuffer),
+            path: 'model_q4.onnx_data'
+          }]
+        });
+
+        console.log('[WebGPU Demo] Model loaded successfully');
+        console.log('Inputs:', session.inputNames);
+
         updateStatus('Ready (WebGPU Q4)', 'ready');
         updateGenerateButton(false, 'Generate');
-
-        console.log('[WebGPU Demo] Pipeline loaded successfully');
 
       } catch (err) {
         console.error(err);
         showDownloadProgress(false);
         updateStatus('Failed to load', 'error');
         updateGenerateButton(false, 'Retry');
-        setOutput(`Error loading model:\n${err.message}\n\nMake sure WebGPU is enabled and you're using a supported browser.\n\nNote: You may see a "TokenizersBackend" warning in the console — this is non-fatal and the model should still work (the library falls back to the base tokenizer).`);
+        setOutput(`Error loading model:\n${err.message}\n\nMake sure WebGPU is enabled and you're using a supported browser.`);
       } finally {
         isLoading = false;
       }
     }
 
-    // === Generation using high-level pipeline ===
+    // === Manual generation loop (required for LFM2 hybrid conv+attention ONNX with custom cache) ===
     async function runGeneration(promptText) {
-      if (!generator) {
+      if (!session || !tokenizer) {
         await loadModel();
       }
-      if (!generator) throw new Error("Model failed to load");
+      if (!session) throw new Error("Model failed to load");
 
       getSamplingParams();
 
       const startTime = performance.now();
       const outputContainer = document.getElementById('output-container');
-      outputContainer.innerHTML = '';
+      outputContainer.innerHTML = ''; // clear placeholder
 
+      // Use the chat template from the model
       const messages = [{ role: "user", content: promptText }];
-
-      // Use return_full_text: false to get only the generated response
-      const outputs = await generator(messages, {
-        max_new_tokens: MAX_NEW_TOKENS,
-        temperature: TEMPERATURE,
-        top_k: TOP_K,
-        repetition_penalty: REPETITION_PENALTY,
-        return_full_text: false,
+      const prompt = tokenizer.apply_chat_template(messages, {
+        add_generation_prompt: true,
+        tokenize: false
       });
 
-      const generated = outputs[0]?.generated_text || '';
-      setOutput(generated);
+      let inputIds = tokenizer.encode(prompt, { add_special_tokens: false });
+      const promptLen = inputIds.length;
+
+      let generatedTokens = [];
+
+      // Dynamic cache init based on what the session expects
+      const cache = {};
+      for (const name of session.inputNames) {
+        if (name.startsWith('past_conv')) {
+          cache[name] = new ortGlobal.Tensor('float32', new Float32Array(HIDDEN_SIZE * 3), [1, HIDDEN_SIZE, 3]);
+        } else if (name.startsWith('past_key_values')) {
+          cache[name] = new ortGlobal.Tensor('float32', new Float32Array(0), [1, NUM_KV_HEADS, 0, HEAD_DIM]);
+        }
+      }
+
+      const eosTokenId = tokenizer.eos_token_id || 7;
+      const usePositionIds = session.inputNames.includes('position_ids');
+
+      for (let step = 0; step < MAX_NEW_TOKENS; step++) {
+        if (isGenerating === false) break; // user can stop
+
+        let currIds;
+        let currPos;
+        const currentTotalLen = promptLen + generatedTokens.length;
+
+        if (step === 0) {
+          currIds = inputIds;
+          currPos = Array.from({ length: promptLen }, (_, i) => i);
+        } else {
+          currIds = [generatedTokens[generatedTokens.length - 1]];
+          currPos = [promptLen + generatedTokens.length - 1];
+        }
+
+        const attnMask = new Array(currentTotalLen).fill(1);
+
+        const feed = {
+          input_ids: new ortGlobal.Tensor('int64', new BigInt64Array(currIds.map(BigInt)), [1, currIds.length]),
+          attention_mask: new ortGlobal.Tensor('int64', new BigInt64Array(attnMask.map(BigInt)), [1, attnMask.length]),
+          ...cache
+        };
+
+        if (usePositionIds) {
+          feed.position_ids = new ortGlobal.Tensor('int64', new BigInt64Array(currPos.map(BigInt)), [1, currPos.length]);
+        }
+
+        const outputs = await session.run(feed);
+
+        // logits is usually the first output
+        let logitsTensor = outputs[0];
+        if (!logitsTensor || !logitsTensor.data) {
+          // fallback if named
+          logitsTensor = outputs.logits || Object.values(outputs).find(t => t && t.dims && t.dims.length === 3);
+        }
+
+        const vocabSize = logitsTensor.dims[2];
+        const lastLogits = logitsTensor.data.slice((logitsTensor.dims[1] - 1) * vocabSize, logitsTensor.dims[1] * vocabSize);
+
+        const nextToken = sampleToken(lastLogits, generatedTokens, vocabSize);
+        generatedTokens.push(nextToken);
+
+        // Stream decoded token
+        const text = tokenizer.decode([nextToken], { skip_special_tokens: true });
+        appendToken(text || '');
+
+        if (nextToken === eosTokenId) {
+          break;
+        }
+
+        // Update the KV / conv caches from the "present_*" outputs
+        for (const [name, tensor] of Object.entries(outputs)) {
+          const pastName = name
+            .replace('present_conv', 'past_conv')
+            .replace('present.', 'past_key_values.');
+          if (cache[pastName] !== undefined) {
+            cache[pastName] = tensor;
+          }
+        }
+      }
 
       const elapsed = performance.now() - startTime;
-      // Approximate token count (rough)
-      const approxTokens = Math.ceil(generated.length / 4);
-      showPerf(approxTokens, elapsed);
+      showPerf(generatedTokens.length, elapsed);
     }
 
     // === Public generate function ===
