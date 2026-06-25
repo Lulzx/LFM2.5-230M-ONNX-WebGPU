@@ -144,6 +144,18 @@
           </div>
         </div>
 
+        <!-- Download Progress -->
+        <div id="download-progress-container" class="hidden mt-3">
+          <div class="flex items-center justify-between text-[10px] text-zinc-400 mb-1 font-mono">
+            <span id="download-label">Downloading model...</span>
+            <span id="download-percent">0%</span>
+          </div>
+          <div class="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+            <div id="download-bar" class="h-1.5 bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 transition-all" style="width: 0%"></div>
+          </div>
+          <div class="text-[9px] text-zinc-500 mt-0.5">First load downloads ~200 MB (cached after)</div>
+        </div>
+
         <!-- Settings -->
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div>
@@ -334,6 +346,51 @@
       document.getElementById('perf-info').classList.add('hidden');
     }
 
+    // === Progress UI helpers ===
+    function showDownloadProgress(show) {
+      const c = document.getElementById('download-progress-container');
+      if (c) c.classList.toggle('hidden', !show);
+    }
+
+    function updateDownloadProgress(percent, label) {
+      const bar = document.getElementById('download-bar');
+      const pctEl = document.getElementById('download-percent');
+      const labelEl = document.getElementById('download-label');
+      if (bar) bar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+      if (pctEl) pctEl.textContent = `${percent}%`;
+      if (labelEl && label) labelEl.textContent = label;
+    }
+
+    async function fetchWithProgress(url, onProgress, label = 'file') {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+      const contentLength = response.headers.get('content-length');
+      const total = contentLength ? parseInt(contentLength, 10) : 0;
+      const reader = response.body.getReader();
+      let received = 0;
+      const chunks = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        if (total > 0) {
+          const p = Math.round((received / total) * 100);
+          onProgress(p, `${label} (${(received / 1024 / 1024).toFixed(0)} / ${(total / 1024 / 1024).toFixed(0)} MB)`);
+        } else {
+          onProgress(50, `${label} (streaming...)`);
+        }
+      }
+      // Concatenate into ArrayBuffer
+      const buffer = new Uint8Array(received);
+      let offset = 0;
+      for (const chunk of chunks) {
+        buffer.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return buffer.buffer;
+    }
+
     // === CORE: Load ONNX + Tokenizer (low-level for full LFM2 compatibility) ===
     async function loadModel() {
       if (session) return; // already loaded
@@ -357,20 +414,32 @@
         const hf = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/dist/transformers.min.js');
         AutoTokenizer = hf.AutoTokenizer;
 
-        updateStatus('Downloading model (~200MB)...', 'loading');
-
-        // 3. Download tokenizer from the model
+        // 3. Download tokenizer (small)
         tokenizer = await AutoTokenizer.from_pretrained(MODEL_ID);
 
-        // 4. Download the ONNX model (Q4 recommended for WebGPU)
+        // 4. Download the ONNX model files with visible progress (~200 MB total for Q4)
+        updateStatus('Downloading model (~200MB)...', 'loading');
+        showDownloadProgress(true);
+        updateDownloadProgress(0, 'Preparing download...');
+
         const base = `https://huggingface.co/${MODEL_ID}/resolve/main`;
         const modelUrl = `${base}/onnx/model_q4.onnx`;
         const dataUrl = `${base}/onnx/model_q4.onnx_data`;
 
-        // Create session with WebGPU + external data
-        session = await ortGlobal.InferenceSession.create(modelUrl, {
+        // Download graph (small) + weights (main size) with progress callbacks
+        const modelBuffer = await fetchWithProgress(modelUrl, (p, lbl) => updateDownloadProgress(p, lbl), 'graph');
+        const dataBuffer = await fetchWithProgress(dataUrl, (p, lbl) => updateDownloadProgress(p, lbl), 'weights');
+
+        showDownloadProgress(false);
+        updateStatus('Initializing on WebGPU...', 'loading');
+
+        // Create session from in-memory buffers + external data
+        session = await ortGlobal.InferenceSession.create(modelBuffer, {
           executionProviders: ['webgpu'],
-          externalData: [{ path: 'model_q4.onnx_data', data: dataUrl }]
+          externalData: [{
+            path: 'model_q4.onnx_data',
+            data: new Uint8Array(dataBuffer)
+          }]
         });
 
         updateStatus('Ready (WebGPU Q4)', 'ready');
